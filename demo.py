@@ -10,7 +10,7 @@ params['A'] = 1.0
 params['B'] = 1.0
 params['Sigma'] = 0.3
 params['y'] = [3,0]
-params['M'] = np.eye(2)
+params['M'] = 3*np.eye(2)
 params['L'] = 2*np.eye(2)
 params['w'] = 1.0
 

@@ -28,14 +28,6 @@ class MoGMDP(object):
         self.nx, self.na = self.B.shape
         self.nr = self.w.size
 
-        # cache cholesky decompositions of our matrices.
-        self.cholSigma,  _ = sp.linalg.cho_factor(self.Sigma)
-        self.cholSigma0, _ = sp.linalg.cho_factor(self.Sigma0)
-
-        self.cholL = self.L.copy()
-        for Li in self.cholL:
-            sp.linalg.cho_factor(Li, overwrite_a=True)
-
     def unpack_policy(self, theta):
         theta = np.array(theta)
         ell = self.nx * self.na
@@ -111,43 +103,6 @@ class ForwardMessage(object):
         mu = np.dot(trans.F, self.mu) + trans.m
         Sigma = np.dot(np.dot(trans.F, self.Sigma), trans.F.T) + trans.Sigma
         return self.__class__(mu, Sigma)
-
-class BackwardMessage(object):
-    def __init__(self, c, mu, Omega):
-        self.c = c
-        self.mu = mu
-        self.Omega = Omega
-
-    @classmethod
-    def init(cls, model):
-        c, mu, Omega = map(np.zeros, (model.w.shape, model.y.shape, model.L.shape))
-        for i in xrange(c.size):
-            cholLI_y = sp.linalg.solve_triangular(model.cholL[i], model.y[i], trans=1)
-            cholLI_M = sp.linalg.solve_triangular(model.cholL[i], model.M[i], trans=1)
-
-            c[i] = -2*np.log(model.w[i]) + np.dot(cholLI_y.T, cholLI_y) + \
-                    np.log(np.linalg.det(2 * np.pi * model.L[i]))
-            # c[i] = np.dot(cholLI_y.T, cholLI_y)
-            mu[i] = np.dot(cholLI_M.T, cholLI_y)
-            Omega[i] = np.dot(cholLI_M.T, cholLI_M)
-
-        return cls(c, mu,  Omega)
-
-    def get_next(self, trans):
-        c, mu, Omega = map(np.zeros, (self.c.shape, self.mu.shape, self.Omega.shape))
-
-        for i in xrange(c.size):
-            cholO, _ = sp.linalg.cho_factor(self.Omega[i] + trans.SigmaI)
-            cholOI_vt = sp.linalg.solve_triangular(cholO, self.mu[i] + trans.SigmaI_m, trans=1)
-            cholOI_SigmaI_F = sp.linalg.solve_triangular(cholO, trans.SigmaI_F, trans=1)
-
-            c[i] = self.c[i] + trans.logDetSigma + 2*np.sum(np.log(np.diag(cholO))) \
-                             - np.dot(cholOI_vt.T, cholOI_vt) + trans.m_SigmaI_m
-
-            mu[i] = np.dot(trans.SigmaI_F.T, sp.linalg.solve_triangular(cholO, cholOI_vt) - trans.m)
-            Omega[i] = trans.F_SigmaI_F - np.dot(cholOI_SigmaI_F.T, cholOI_SigmaI_F)
-
-        return self.__class__(c, mu, Omega)
 
 #===================================================================================================
 # MESSAGE HANDLERS/SOLVERS.
@@ -236,67 +191,45 @@ def get_gradient(model, policy, gamma, H):
 
     return J, dJ
 
-# def get_moments(model, policy, gamma, H):
-#     A, B = get_messages(model, policy, H)
-#     Z, ZZ = 0, 0
-# 
-#     for k in xrange(H+1):
-#         for n in xrange(k+1):
-#             for i in xrange(model.nr):
-#                 w, mu, Sigma = get_alphabeta(A[n], B[k-n], i)
-#                 Z  += w * gamma**k * mu
-#                 ZZ += w * gamma**k * (Sigma + np.outer(mu, mu))
-# 
-#     return Z, ZZ
-
 #===================================================================================================
 # New code to just compute the moments.
 #===================================================================================================
 
-def mvn_pdf(y, mu, Sigma):
-    d = len(y)
-    cholSigma, _ = sp.linalg.cho_factor(Sigma)
-    diff = sp.linalg.solve_triangular(cholSigma, y-mu, trans=1, overwrite_b=True)
-    tmp = np.sum(diff**2) + 2*np.sum(np.log(np.diag(cholSigma))) + d * np.log(2*np.pi)
-    return np.exp(-0.5*tmp)
-
 def get_moments(model, policy, gamma, H):
     trans = ZTransition(model, policy)
+    jtheta = 0.0
 
     forward = [ForwardMessage.init(model, policy)]
     for k in xrange(H):
         forward.append(forward[-1].get_next(trans))
 
-    # for k in reversed(xrange(H+1)):
+    for k in reversed(xrange(H+1)):
+        alpha = forward[k]
+        y, M, L = model.y[0], model.M[0], model.L[0]
         
-    k = H
-    alpha = forward[k]
-    y, M, L = model.y[0], model.M[0], model.L[0]
-        
-    # get the innovation r, i.e. the difference between the "observed" y 
-    # and the prediction, and the cholesky of the innovation covariance 
-    # cholS.
-    r = y - np.dot(M, alpha.mu)
-    cholS = sp.linalg.cho_factor(np.dot(M, np.dot(alpha.Sigma, M.T)) + L, overwrite_a=True)
-        
-    K = sp.linalg.cho_solve(cholS, np.dot(M, alpha.Sigma), overwrite_b=True).T
-    mu = alpha.mu + np.dot(K, r)
-    Sigma = np.dot(np.eye(y.size) - np.dot(K, M), alpha.Sigma)
-        
-    # NOTE! This appears to be off by a factor of 2pi, at least in the case when L is one. This is probably because here I'm assuming a true, normalized Gaussian, but I should really figure out what's going on and fix it.
-    # c = mvn_pdf(y, np.dot(M, mu), MSM + L)
-    # jtheta += gamma**k * c
+        # FIXME: I'm currently just using the first component, of the reward 
+        # model, and I'm ignoring the weights w, i.e. just assuming they're one.
+                
+        # get the innovation r, i.e. the difference between the "observed" y 
+        # and the prediction; the cholesky of the innovation covariance cholS; 
+        # and the log-determinant of this covariance.
+        d = y.size
+        r = y - np.dot(M, alpha.mu)
+        cholS, _ = sp.linalg.cho_factor(np.dot(M, np.dot(alpha.Sigma, M.T)) + L, overwrite_a=True)
+        logDetS = 2*np.sum(np.log(np.diag(cholS)))
+    
+        K = sp.linalg.cho_solve((cholS, False), np.dot(M, alpha.Sigma), overwrite_b=True).T
+        mu = alpha.mu + np.dot(K, r)
+        Sigma = np.dot(np.eye(d) - np.dot(K, M), alpha.Sigma)
 
-    return mu, Sigma
+        # this is the "likelihood" term, which corresponds to the reward. since
+        # we're using unnormalized Gaussians we don't include the 2*pi term, and we
+        # subtract off the normalizing constant involving L.
+        c = np.sum(sp.linalg.solve_triangular(cholS, r, trans=1)**2)
+        c += logDetS - np.log(np.linalg.det(L))
+        c = np.exp(-0.5*c)
+        
+        jtheta += gamma**k * c
 
-#===================================================================================================
-# HELPER CODE.
-#===================================================================================================
-
-def oprod(x, y):
-    """A 'vectorized' version of the outer product."""
-    nx = x.shape[1]
-    ny = y.shape[1]
-    return \
-        tile(x.reshape(-1,nx, 1), (1, 1,ny)) * \
-        tile(y.reshape(-1, 1,ny), (1,nx, 1))
+    return jtheta
+    # return c, mu, Sigma
