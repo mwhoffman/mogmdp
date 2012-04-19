@@ -63,32 +63,10 @@ class ZTransition(object):
             np.c_[model.Sigma, KSigma.T],
             np.c_[KSigma, np.dot(KSigma, policy.K.T) + np.eye(model.na) * (policy.sigma**2)]]
 
-        cholSigma, _ = sp.linalg.cho_factor(self.Sigma)
-        cholSigmaI_F = sp.linalg.solve_triangular(cholSigma, self.F, trans=1)
-        cholSigmaI_m = sp.linalg.solve_triangular(cholSigma, self.m, trans=1)
-
-        self.SigmaI = sp.linalg.cho_solve((cholSigma, False), np.eye(model.nx+model.na))
-        self.SigmaI_F = sp.linalg.solve_triangular(cholSigma, cholSigmaI_F)
-        self.SigmaI_m = sp.linalg.solve_triangular(cholSigma, cholSigmaI_m)
-        self.F_SigmaI_F = np.dot(cholSigmaI_F.T, cholSigmaI_F)
-        self.m_SigmaI_m = np.dot(cholSigmaI_m.T, cholSigmaI_m)
-        self.logDetSigma = 2*np.sum(np.log(np.diag(cholSigma)))
-
 class ForwardMessage(object):
     def __init__(self, mu, Sigma):
         self.mu = mu
         self.Sigma = Sigma
-
-        # get the cholesky (upper triangular) of the covariance.
-        cholSigma, _ = sp.linalg.cho_factor(self.Sigma)
-        cholSigmaI_mu = sp.linalg.solve_triangular(cholSigma, self.mu, trans=1)
-
-        # cache some values.
-        self.SigmaI = sp.linalg.cho_solve((cholSigma, False), np.eye(mu.size))
-        self.SigmaI_mu = sp.linalg.solve_triangular(cholSigma, cholSigmaI_mu)
-        self.cholSigma = cholSigma
-        self.logDetSigma = 2*np.sum(np.log(np.diag(cholSigma)))
-        self.mu_SigmaI_mu = np.dot(cholSigmaI_mu.T, cholSigmaI_mu)
 
     @classmethod
     def init(cls, model, policy):
@@ -107,33 +85,6 @@ class ForwardMessage(object):
 #===================================================================================================
 # MESSAGE HANDLERS/SOLVERS.
 #===================================================================================================
-
-def get_alphabeta(alpha, beta, i):
-    cholS, _ = sp.linalg.cho_factor(beta.Omega[i] + alpha.SigmaI)
-    logDetS = 2*np.sum(np.log(np.diag(cholS)))
-
-    m = sp.linalg.cho_solve((cholS, False), beta.mu[i] + alpha.SigmaI_mu)
-    S = sp.linalg.cho_solve((cholS, False), np.eye(cholS.shape[0]))
-
-    v = sp.linalg.solve_triangular(alpha.cholSigma, m, trans=1)
-    w = np.exp(-0.5 * (
-        + beta.c[i] + logDetS - np.dot(np.dot(m.T, beta.Omega[i]), m) - np.dot(v.T,v)
-        + alpha.logDetSigma + alpha.mu_SigmaI_mu))
-
-    return (w,m,S)
-
-def get_jtheta(model, policy, gamma, H):
-    trans = ZTransition(model, policy)
-    alpha = ForwardMessage.init(model, policy)
-    beta = BackwardMessage.init(model)
-    jtheta = 0.0
-
-    for n in xrange(H+1):
-        for i in xrange(model.nr):
-            w, _, _ = get_alphabeta(alpha, beta, i)
-            jtheta += gamma**n * w
-        alpha = alpha.get_next(trans)
-    return jtheta
 
 def get_expectations(policy, mu, Sigma):
     # convert these intro matrices (while not copying) just so that they're 
