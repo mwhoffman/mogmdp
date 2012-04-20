@@ -2,8 +2,8 @@ from __future__ import division
 
 import numpy as np
 import scipy as sp
-
 import scipy.linalg
+import itertools
 
 class MoGMDP(object):
     """Mixture of Gaussians MDP."""
@@ -87,7 +87,7 @@ class ForwardMessage(object):
 #===================================================================================================
 
 def get_expectations(policy, mu, Sigma):
-    # convert these intro matrices (while not copying) just so that they're 
+    # convert these intro matrices (while not copying) just so that they're
     # easier to work with. it doesn't really use any additional memory anyways.
     z = np.asmatrix(mu).T
     S = np.asmatrix(Sigma)
@@ -146,41 +146,85 @@ def get_gradient(model, policy, gamma, H):
 # New code to just compute the moments.
 #===================================================================================================
 
+def kalman_update(model, alpha):
+    y, M, L = model.y[0], model.M[0], model.L[0]
+
+    # FIXME: I'm currently just using the first component, of the reward
+    # model, and I'm ignoring the weights w, i.e. just assuming they're one.
+
+    # get the innovation r, i.e. the difference between the "observed" y
+    # and the prediction; the cholesky of the innovation covariance cholS;
+    # and the log-determinant of this covariance.
+    d = y.size
+    r = y - np.dot(M, alpha.mu)
+    cholS, _ = sp.linalg.cho_factor(np.dot(M, np.dot(alpha.Sigma, M.T)) + L, overwrite_a=True)
+    logDetS = 2*np.sum(np.log(np.diag(cholS)))
+
+    K = sp.linalg.cho_solve((cholS, False), np.dot(M, alpha.Sigma), overwrite_b=True).T
+    mu = alpha.mu + np.dot(K, r)
+    Sigma = np.dot(np.eye(d) - np.dot(K, M), alpha.Sigma)
+
+    # this is the "likelihood" term, which corresponds to the reward. since
+    # we're using unnormalized Gaussians we don't include the 2*pi term, and we
+    # subtract off the normalizing constant involving L.
+    c = np.sum(sp.linalg.solve_triangular(cholS, r, trans=1)**2)
+    c += logDetS - np.log(np.linalg.det(L))
+    c = np.exp(-0.5*c)
+
+    return c, mu, Sigma
+
 def get_moments(model, policy, gamma, H):
     trans = ZTransition(model, policy)
-    jtheta = 0.0
-
     forward = [ForwardMessage.init(model, policy)]
     for k in xrange(H):
         forward.append(forward[-1].get_next(trans))
 
-    for k in reversed(xrange(H+1)):
-        alpha = forward[k]
-        y, M, L = model.y[0], model.M[0], model.L[0]
-        
-        # FIXME: I'm currently just using the first component, of the reward 
-        # model, and I'm ignoring the weights w, i.e. just assuming they're one.
-                
-        # get the innovation r, i.e. the difference between the "observed" y 
-        # and the prediction; the cholesky of the innovation covariance cholS; 
-        # and the log-determinant of this covariance.
-        d = y.size
-        r = y - np.dot(M, alpha.mu)
-        cholS, _ = sp.linalg.cho_factor(np.dot(M, np.dot(alpha.Sigma, M.T)) + L, overwrite_a=True)
-        logDetS = 2*np.sum(np.log(np.diag(cholS)))
-    
-        K = sp.linalg.cho_solve((cholS, False), np.dot(M, alpha.Sigma), overwrite_b=True).T
-        mu = alpha.mu + np.dot(K, r)
-        Sigma = np.dot(np.eye(d) - np.dot(K, M), alpha.Sigma)
+    # get the first components.
+    c, mu, Sigma = kalman_update(model, forward[H])
+    c *= gamma**H
+    mu *= c
 
-        # this is the "likelihood" term, which corresponds to the reward. since
-        # we're using unnormalized Gaussians we don't include the 2*pi term, and we
-        # subtract off the normalizing constant involving L.
-        c = np.sum(sp.linalg.solve_triangular(cholS, r, trans=1)**2)
-        c += logDetS - np.log(np.linalg.det(L))
-        c = np.exp(-0.5*c)
-        
-        jtheta += gamma**k * c
+    J = c
+    Z = mu.copy()
 
-    return jtheta
-    # return c, mu, Sigma
+    for n in reversed(xrange(H)):
+        # this is the components of the forward messages and the backward
+        # messages respectively, i.e. the components corresponding to p(z_n) and
+        # p(z_n|y_n).
+        mu_n, Sigma_n = forward[n].mu, forward[n].Sigma
+        c, mu_hat, Sigma_hat = kalman_update(model, forward[n])
+
+        # get the components in order to do the smoothing step.
+        tmp = np.dot(trans.F, Sigma_n)
+        P = np.dot(tmp, trans.F.T) + trans.Sigma
+        G = sp.linalg.solve(P, tmp, sym_pos=True, overwrite_b=True).T
+
+        # do the smoothing for all components.
+        c *= gamma**n
+        mu = np.dot(G, mu) + c*mu_hat + J*(mu_n - np.dot(G, np.dot(trans.F, mu_n) + trans.m))
+
+        J += c
+        Z += mu
+
+    return J, Z
+
+def get_moment(model, policy, gamma, H, tau):
+    trans = ZTransition(model, policy)
+    forward = [ForwardMessage.init(model, policy)]
+    for k in xrange(H):
+        forward.append(forward[-1].get_next(trans))
+
+    # get the "final" component.
+    c, mu, Sigma = kalman_update(model, forward[H])
+
+    for n in itertools.islice(reversed(xrange(H)), tau):
+        # get the components in order to do the smoothing step.
+        tmp = np.dot(trans.F, forward[n].Sigma)
+        P = np.dot(tmp, trans.F.T) + trans.Sigma
+        G = sp.linalg.solve(P, tmp, sym_pos=True, overwrite_b=True).T
+
+        mu = forward[n].mu + np.dot(G, mu) - np.dot(G, np.dot(trans.F, forward[n].mu) + trans.m)
+        Sigma = forward[n].Sigma + np.dot(G, np.dot(Sigma - P, G.T))
+
+    return c, mu, Sigma
+
