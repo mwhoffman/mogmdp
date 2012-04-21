@@ -22,17 +22,17 @@ forward = [mogmdp.ForwardMessage.init(model, policy)]
 for k in xrange(20):
     forward.append(forward[-1].get_next(trans))
 
-H = 50
-Z = 0
-J = 0
+H = 20
 gamma = 0.95
+J, Z, ZZ = 0, 0, 0
 
 for n in xrange(H+1):
     for k in xrange(n, H+1):
         c, mu, Sigma = mogmdp.get_moment(model, policy, 0.95, k, k-n)
         c *= gamma**k
         Z += c*mu
+        ZZ += c*(Sigma + np.outer(mu, mu))
         J += c if (k==n) else 0
 
-print (J, Z)
-print mogmdp.get_moments(model, policy, gamma, H)
+for (a,b) in zip((J, Z, ZZ), mogmdp.get_moments(model, policy, gamma, H)):
+    assert np.allclose(a, b)

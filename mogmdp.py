@@ -180,33 +180,41 @@ def get_moments(model, policy, gamma, H):
         forward.append(forward[-1].get_next(trans))
 
     # get the first components.
-    c, mu, Sigma = kalman_update(model, forward[H])
+    c, mu_hat, Sigma_hat = kalman_update(model, forward[H])
     c *= gamma**H
-    mu *= c
-
-    J = c
-    Z = mu.copy()
+    mu = c*mu_hat
+    Omega = c*Sigma_hat + c*np.outer(mu_hat, mu_hat)
+    J, Z, ZZ = c, mu.copy(), Omega.copy()
 
     for n in reversed(xrange(H)):
         # this is the components of the forward messages and the backward
         # messages respectively, i.e. the components corresponding to p(z_n) and
         # p(z_n|y_n).
-        mu_n, Sigma_n = forward[n].mu, forward[n].Sigma
+        mu_fwd, Sigma_fwd = forward[n].mu, forward[n].Sigma
         c, mu_hat, Sigma_hat = kalman_update(model, forward[n])
+        c *= gamma**n
 
         # get the components in order to do the smoothing step.
-        tmp = np.dot(trans.F, Sigma_n)
+        tmp = np.dot(trans.F, Sigma_fwd)
         P = np.dot(tmp, trans.F.T) + trans.Sigma
         G = sp.linalg.solve(P, tmp, sym_pos=True, overwrite_b=True).T
 
-        # do the smoothing for all components.
-        c *= gamma**n
-        mu = np.dot(G, mu) + c*mu_hat + J*(mu_n - np.dot(G, np.dot(trans.F, mu_n) + trans.m))
+        # do the smoothing for the summation of the first moment.
+        mu_rev = mu_fwd - np.dot(G, np.dot(trans.F, mu_fwd) + trans.m)
+        Gmu = np.dot(G, mu)
+        mu = c*mu_hat + J*mu_rev + Gmu
+
+        # smoothing for the summation of the second moment.
+        a = np.outer(Gmu, mu_rev)
+        Omega_hat = Sigma_hat + np.outer(mu_hat, mu_hat)
+        Omega_rev = Sigma_fwd - np.dot(G, np.dot(P, G.T)) + np.outer(mu_rev, mu_rev)
+        Omega = c*Omega_hat + J*Omega_rev + np.dot(G, np.dot(Omega, G.T)) + a + a.T
 
         J += c
         Z += mu
+        ZZ += Omega
 
-    return J, Z
+    return J, Z, ZZ
 
 def get_moment(model, policy, gamma, H, tau):
     trans = ZTransition(model, policy)
