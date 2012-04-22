@@ -3,7 +3,6 @@ from __future__ import division
 import numpy as np
 import scipy as sp
 import scipy.linalg
-import itertools
 
 class MoGMDP(object):
     """Mixture of Gaussians MDP."""
@@ -185,23 +184,3 @@ def get_gradient(model, policy, gamma, H):
     ds = (policy.sigma**-1) * (policy.sigma**-2 * CC - Js*model.na)
 
     return J, np.r_[dK.flatten(), dm.flatten(), ds]
-
-def get_moment(model, policy, gamma, H, tau):
-    trans = ZTransition(model, policy)
-    forward = [ForwardMessage.init(model, policy)]
-    for k in xrange(H):
-        forward.append(forward[-1].get_next(trans))
-
-    # get the "final" component.
-    c, mu, Sigma = kalman_update(model, forward[H])
-
-    for n in itertools.islice(reversed(xrange(H)), tau):
-        # get the components in order to do the smoothing step.
-        tmp = np.dot(trans.F, forward[n].Sigma)
-        P = np.dot(tmp, trans.F.T) + trans.Sigma
-        G = sp.linalg.solve(P, tmp, sym_pos=True, overwrite_b=True).T
-
-        mu = forward[n].mu + np.dot(G, mu) - np.dot(G, np.dot(trans.F, forward[n].mu) + trans.m)
-        Sigma = forward[n].Sigma + np.dot(G, np.dot(Sigma - P, G.T))
-
-    return c, mu, Sigma
