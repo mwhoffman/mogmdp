@@ -151,7 +151,14 @@ def get_zmoments(model, policy, gamma, H):
         # get the components in order to do the smoothing step.
         tmp = np.dot(zmodel.F, Sigma_fwd)
         P = np.dot(tmp, zmodel.F.T) + zmodel.Sigma
-        G = sp.linalg.solve(P, tmp, sym_pos=True, overwrite_b=True).T
+        try:
+            G = sp.linalg.solve(P, tmp, sym_pos=True, overwrite_b=True).T
+        except np.linalg.LinAlgError:
+            print 'WARNING: restarting backward-pass with horizon %d (instead of %d)' % (n, H)
+            mu = c*mu_hat
+            Omega = c*np.outer(mu_hat, mu_hat) + c*Sigma_hat
+            J, Js, Z, ZZ = c, c, mu.copy(), Omega.copy()
+            continue
 
         # do the smoothing for the summation of the first moment.
         mu_rev = mu_fwd - np.dot(G, np.dot(zmodel.F, mu_fwd) + zmodel.m)
