@@ -50,7 +50,10 @@ class MoGPolicy(object):
         dK = self.sigma**(-2) * oprod(A, x).reshape(n,-1)
         dm = self.sigma**(-2) * A
         ds = self.sigma**(-3) * sum(A**2, axis=1).reshape(n,-1) - self.na/self.sigma
-        return c_[dK, dm, ds]
+        return np.c_[dK, dm, ds]
+
+    def pack(self):
+        return np.r_[self.K.flatten(), self.m.flatten(), self.sigma]
 
 #===================================================================================================
 # Code to get the state/action transition and initial "state" models.
