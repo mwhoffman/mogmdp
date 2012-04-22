@@ -6,24 +6,24 @@ import itertools
 import mogmdp
 
 def get_moment(model, policy, gamma, H, tau):
-    trans = mogmdp.ZTransition(model, policy)
-    forward = [mogmdp.ForwardMessage.init(model, policy)]
-    for k in xrange(H):
-        forward.append(forward[-1].get_next(trans))
+    forward, zmodel = mogmdp.get_forward(model, policy, H)
 
     # get the "final" component.
-    c, mu, Sigma = mogmdp.kalman_update(model, forward[H])
+    mu_fwd, Sigma_fwd = forward[H]
+    mu_hat, Sigma_hat, c = mogmdp.kalman_update(model, mu_fwd, Sigma_fwd)
 
     for n in itertools.islice(reversed(xrange(H)), tau):
+        mu_fwd, Sigma_fwd = forward[n]
+
         # get the components in order to do the smoothing step.
-        tmp = np.dot(trans.F, forward[n].Sigma)
-        P = np.dot(tmp, trans.F.T) + trans.Sigma
+        tmp = np.dot(zmodel.F, Sigma_fwd)
+        P = np.dot(tmp, zmodel.F.T) + zmodel.Sigma
         G = sp.linalg.solve(P, tmp, sym_pos=True, overwrite_b=True).T
 
-        mu = forward[n].mu + np.dot(G, mu) - np.dot(G, np.dot(trans.F, forward[n].mu) + trans.m)
-        Sigma = forward[n].Sigma + np.dot(G, np.dot(Sigma - P, G.T))
+        mu_hat = mu_fwd + np.dot(G, mu_hat) - np.dot(G, np.dot(zmodel.F, mu_fwd) + zmodel.m)
+        Sigma_hat = Sigma_fwd + np.dot(G, np.dot(Sigma_hat - P, G.T))
 
-    return c, mu, Sigma
+    return mu_hat, Sigma_hat, c
 
 params = {}
 params['mu0'] = -5.0
@@ -49,7 +49,7 @@ A = np.r_[np.c_[np.inner(policy.K, policy.K), -policy.K.T], M]
 
 for n in xrange(H+1):
     for k in xrange(n, H+1):
-        c, mu_hat, Sigma_hat = get_moment(model, policy, 0.95, k, k-n)
+        mu_hat, Sigma_hat, c = get_moment(model, policy, 0.95, k, k-n)
         c *= gamma**k
         z, zz = mu_hat, (Sigma_hat + np.outer(mu_hat, mu_hat))
 

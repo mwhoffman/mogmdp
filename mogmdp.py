@@ -4,6 +4,8 @@ import numpy as np
 import scipy as sp
 import scipy.linalg
 
+from collections import namedtuple
+
 class MoGMDP(object):
     """Mixture of Gaussians MDP."""
 
@@ -50,42 +52,38 @@ class MoGPolicy(object):
         ds = self.sigma**(-3) * sum(A**2, axis=1).reshape(n,-1) - self.na/self.sigma
         return c_[dK, dm, ds]
 
-class ZTransition(object):
-    def __init__(self, model, policy):
-        self.m = np.r_[np.zeros(model.nx), policy.m]
-        self.F = np.r_[
-            np.c_[model.A, model.B],
-            np.c_[np.dot(policy.K, model.A), np.dot(policy.K, model.B)]]
+#===================================================================================================
+# Code to get the state/action transition and initial "state" models.
+#===================================================================================================
 
-        KSigma = np.dot(policy.K, model.Sigma)
-        self.Sigma = np.r_[
-            np.c_[model.Sigma, KSigma.T],
-            np.c_[KSigma, np.dot(KSigma, policy.K.T) + np.eye(model.na) * (policy.sigma**2)]]
+ZModel = namedtuple('ZModel', 'mu0, Sigma0, F, m, Sigma')
 
-class ForwardMessage(object):
-    def __init__(self, mu, Sigma):
-        self.mu = mu
-        self.Sigma = Sigma
+def get_zmodel(model, policy):
+    ISigma = np.eye(model.na) * policy.sigma**2
+    KSigma = np.dot(policy.K, model.Sigma)
+    KSigma0 = np.dot(policy.K, model.Sigma0)
 
-    @classmethod
-    def init(cls, model, policy):
-        KSigma0 = np.dot(policy.K, model.Sigma0)
-        mu = np.r_[model.mu0, np.dot(policy.K, model.mu0) + policy.m]
-        Sigma = np.r_[
-            np.c_[model.Sigma0, KSigma0.T],
-            np.c_[KSigma0, np.dot(KSigma0, policy.K.T) + np.eye(model.na) * (policy.sigma**2)]]
-        return cls(mu, Sigma)
+    mu0 = np.r_[model.mu0, np.dot(policy.K, model.mu0) + policy.m]
+    Sigma0 = np.r_[np.c_[model.Sigma0, KSigma0.T],
+                   np.c_[KSigma0, np.dot(KSigma0, policy.K.T) + ISigma]]
 
-    def get_next(self, trans):
-        mu = np.dot(trans.F, self.mu) + trans.m
-        Sigma = np.dot(np.dot(trans.F, self.Sigma), trans.F.T) + trans.Sigma
-        return self.__class__(mu, Sigma)
+    F = np.r_[np.c_[model.A, model.B], np.c_[np.dot(policy.K, model.A), np.dot(policy.K, model.B)]]
+    m = np.r_[np.zeros(model.nx), policy.m]
+    Sigma = np.r_[np.c_[model.Sigma, KSigma.T],
+                  np.c_[KSigma, np.dot(KSigma, policy.K.T) + ISigma]]
+
+    return ZModel(mu0, Sigma0, F, m, Sigma)
 
 #===================================================================================================
 # Code to compute the moments and the gradient.
 #===================================================================================================
 
-def kalman_update(model, alpha):
+def kalman_predict(zmodel, mu, Sigma):
+    mu = np.dot(zmodel.F, mu) + zmodel.m
+    Sigma = np.dot(np.dot(zmodel.F, Sigma), zmodel.F.T) + zmodel.Sigma
+    return (mu, Sigma)
+
+def kalman_update(model, mu, Sigma):
     y, M, L = model.y[0], model.M[0], model.L[0]
 
     # FIXME: I'm currently just using the first component, of the reward
@@ -94,14 +92,15 @@ def kalman_update(model, alpha):
     # get the innovation r, i.e. the difference between the "observed" y
     # and the prediction; the cholesky of the innovation covariance cholS;
     # and the log-determinant of this covariance.
-    d = y.size
-    r = y - np.dot(M, alpha.mu)
-    cholS, _ = sp.linalg.cho_factor(np.dot(M, np.dot(alpha.Sigma, M.T)) + L, overwrite_a=True)
+    d = model.nx + model.na
+    r = y - np.dot(M, mu)
+    cholS, _ = sp.linalg.cho_factor(np.dot(M, np.dot(Sigma, M.T)) + L, overwrite_a=True)
     logDetS = 2*np.sum(np.log(np.diag(cholS)))
 
-    K = sp.linalg.cho_solve((cholS, False), np.dot(M, alpha.Sigma), overwrite_b=True).T
-    mu = alpha.mu + np.dot(K, r)
-    Sigma = np.dot(np.eye(d) - np.dot(K, M), alpha.Sigma)
+    # get the Kalman gain and get the updated mean/variance.
+    K = sp.linalg.cho_solve((cholS, False), np.dot(M, Sigma), overwrite_b=True).T
+    mu = mu + np.dot(K, r)
+    Sigma = np.dot(np.eye(d) - np.dot(K, M), Sigma)
 
     # this is the "likelihood" term, which corresponds to the reward. since
     # we're using unnormalized Gaussians we don't include the 2*pi term, and we
@@ -110,56 +109,63 @@ def kalman_update(model, alpha):
     c += logDetS - np.log(np.linalg.det(L))
     c = np.exp(-0.5*c)
 
-    return c, mu, Sigma
+    return mu, Sigma, c
+
+def get_forward(model, policy, H):
+    # get the Z-model from the model/policy and initialize the forward messages.
+    zmodel = get_zmodel(model, policy)
+    forward = [None] * (H+1)
+    forward[0] = (zmodel.mu0, zmodel.Sigma0)
+
+    # run the forward pass up to the end-horizon.
+    for k in xrange(H):
+        forward[k+1] = kalman_predict(zmodel, *forward[k])
+
+    return forward, zmodel
 
 def get_moments(model, policy, gamma, H):
-    trans = ZTransition(model, policy)
-    forward = [ForwardMessage.init(model, policy)]
-    for k in xrange(H):
-        forward.append(forward[-1].get_next(trans))
+    forward, zmodel = get_forward(model, policy, H)
 
     # get the first components.
-    c, mu_hat, Sigma_hat = kalman_update(model, forward[H])
-    c *= gamma**H
+    mu_fwd, Sigma_fwd = forward[H]
+    mu_hat, Sigma_hat, c = kalman_update(model, mu_fwd, Sigma_fwd)
 
     # initialize the components we'll be using for the backward pass.
+    c *= gamma**H
     mu = c*mu_hat
-    Omega = c*np.outer(mu_hat, mu_hat)
-    Sigma = c*Sigma_hat
+    Omega = c*np.outer(mu_hat, mu_hat) + c*Sigma_hat
 
     # initialize the accumulators.
-    J, Js, Z, ZZ = c, c, mu.copy(), Sigma + Omega
+    J, Js, Z, ZZ = c, c, mu.copy(), Omega.copy()
 
     for n in reversed(xrange(H)):
         # these are the components of the forward messages and the backward
         # messages respectively, i.e. p(z_n) and p(z_n|y_n).
-        mu_fwd, Sigma_fwd = forward[n].mu, forward[n].Sigma
-        c, mu_hat, Sigma_hat = kalman_update(model, forward[n])
+        mu_fwd, Sigma_fwd = forward[n]
+        mu_hat, Sigma_hat, c = kalman_update(model, mu_fwd, Sigma_fwd)
         c *= gamma**n
 
         # get the components in order to do the smoothing step.
-        tmp = np.dot(trans.F, Sigma_fwd)
-        P = np.dot(tmp, trans.F.T) + trans.Sigma
+        tmp = np.dot(zmodel.F, Sigma_fwd)
+        P = np.dot(tmp, zmodel.F.T) + zmodel.Sigma
         G = sp.linalg.solve(P, tmp, sym_pos=True, overwrite_b=True).T
 
         # do the smoothing for the summation of the first moment.
-        mu_rev = mu_fwd - np.dot(G, np.dot(trans.F, mu_fwd) + trans.m)
+        mu_rev = mu_fwd - np.dot(G, np.dot(zmodel.F, mu_fwd) + zmodel.m)
         Gmu = np.dot(G, mu)
         mu = c*mu_hat + J*mu_rev + Gmu
 
         # do the smoothing for the summation of the second moment, for which we
         # get the covariance for free.
         a = np.outer(Gmu, mu_rev)
-        Sigma_rev = Sigma_fwd - np.dot(G, np.dot(P, G.T))
-        Omega_hat = np.outer(mu_hat, mu_hat)
-        Omega_rev = np.outer(mu_rev, mu_rev)
-        Sigma = c*Sigma_hat + J*Sigma_rev + np.dot(G, np.dot(Sigma, G.T))
+        Omega_hat = np.outer(mu_hat, mu_hat) + Sigma_hat
+        Omega_rev = np.outer(mu_rev, mu_rev) + Sigma_fwd - np.dot(G, np.dot(P, G.T))
         Omega = c*Omega_hat + J*Omega_rev + np.dot(G, np.dot(Omega, G.T)) + a + a.T
 
         J += c
         Js += J
         Z += mu
-        ZZ += Sigma + Omega
+        ZZ += Omega
 
     return J, Js, Z, ZZ
 
@@ -181,6 +187,6 @@ def get_gradient(model, policy, gamma, H):
 
     dK = (policy.sigma**-2) * UX - np.dot(policy.K, XX) - np.outer(policy.m, X)
     dm = (policy.sigma**-2) * U - np.dot(policy.K, X) - Js*policy.m
-    ds = (policy.sigma**-1) * (policy.sigma**-2 * CC - Js*model.na)
+    ds = (policy.sigma**-3) * CC - Js*model.na*policy.sigma**-1
 
     return J, np.r_[dK.flatten(), dm.flatten(), ds]
