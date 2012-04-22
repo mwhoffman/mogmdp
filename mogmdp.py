@@ -185,8 +185,8 @@ def get_gradient(model, policy, gamma, H):
     A = np.r_[np.c_[np.inner(policy.K, policy.K), -policy.K.T], M]
     CC = np.trace(np.dot(A, ZZ)) + Js*np.inner(policy.m, policy.m) - 2*np.inner(policy.m, np.dot(M, Z))
 
-    dK = (policy.sigma**-2) * UX - np.dot(policy.K, XX) - np.outer(policy.m, X)
-    dm = (policy.sigma**-2) * U - np.dot(policy.K, X) - Js*policy.m
-    ds = (policy.sigma**-3) * CC - Js*model.na*policy.sigma**-1
+    dK = (policy.sigma**-2) * (UX - np.dot(policy.K, XX) - np.outer(policy.m, X))
+    dm = (policy.sigma**-2) * (U - np.dot(policy.K, X) - Js*policy.m)
+    ds = (policy.sigma**-1) * (CC*policy.sigma**-2 - Js*model.na)
 
     return J, np.r_[dK.flatten(), dm.flatten(), ds]
