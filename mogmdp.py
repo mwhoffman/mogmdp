@@ -169,6 +169,14 @@ def get_zmoments(model, policy, gamma, H):
 
     return J, Js, Z, ZZ
 
+def get_jtheta(model, policy, gamma, H):
+    forward, _ = get_forward(model, policy, H)
+    J = 0.0
+    for n in reversed(xrange(H)):
+        _, _, c = kalman_update(model, *forward[n])
+        J += gamma**n * c
+    return J
+
 def get_moments(model, policy, gamma, H):
     # get the expected return and the first/second moments in the joint
     # state/action space.
