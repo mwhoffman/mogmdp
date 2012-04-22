@@ -123,7 +123,7 @@ def get_forward(model, policy, H):
 
     return forward, zmodel
 
-def get_moments(model, policy, gamma, H):
+def get_zmoments(model, policy, gamma, H):
     forward, zmodel = get_forward(model, policy, H)
 
     # get the first components.
@@ -169,10 +169,10 @@ def get_moments(model, policy, gamma, H):
 
     return J, Js, Z, ZZ
 
-def get_gradient(model, policy, gamma, H):
+def get_moments(model, policy, gamma, H):
     # get the expected return and the first/second moments in the joint
     # state/action space.
-    J, Js, Z, ZZ = get_moments(model, policy, gamma, H)
+    J, Js, Z, ZZ = get_zmoments(model, policy, gamma, H)
 
     # get the moments we're actually interested in.
     nx = policy.nx
@@ -185,8 +185,16 @@ def get_gradient(model, policy, gamma, H):
     A = np.r_[np.c_[np.inner(policy.K, policy.K), -policy.K.T], M]
     CC = np.trace(np.dot(A, ZZ)) + Js*np.inner(policy.m, policy.m) - 2*np.inner(policy.m, np.dot(M, Z))
 
+    return J, Js, X, U, XX, UU, UX, CC
+
+def get_gradient(model, policy, gamma, H):
+    # get the moments we're interested in.
+    J, Js, X, U, XX, UU, UX, CC = get_moments(model, policy, gamma, H)
+
     dK = (policy.sigma**-2) * (UX - np.dot(policy.K, XX) - np.outer(policy.m, X))
     dm = (policy.sigma**-2) * (U - np.dot(policy.K, X) - Js*policy.m)
     ds = (policy.sigma**-1) * (CC*policy.sigma**-2 - Js*model.na)
 
     return J, np.r_[dK.flatten(), dm.flatten(), ds]
+
+

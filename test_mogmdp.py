@@ -58,5 +58,5 @@ for n in xrange(H+1):
         Js += c
         J += c if (k==n) else 0
 
-for (a,b) in zip((J, Js, Z, ZZ), mogmdp.get_moments(model, policy, gamma, H)):
+for (a,b) in zip((J, Js, Z, ZZ), mogmdp.get_zmoments(model, policy, gamma, H)):
     assert np.allclose(a, b)
