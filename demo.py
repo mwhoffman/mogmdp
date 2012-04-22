@@ -14,6 +14,11 @@ params['M'] = 3*np.eye(2)
 params['L'] = 2*np.eye(2)
 params['w'] = 1.0
 
-model = mogmdp.MoGMDP(**params)
-policy = mogmdp.MoGPolicy(-0.8, 0.0, 1.0)
+H = 20
+theta = [-0.8, 0.2, 1.0]
+gamma = 0.95
 
+model = mogmdp.MoGMDP(**params)
+gradient = mogmdp.get_gradient(model, model.unpack_policy(theta), gamma, H)
+
+print gradient

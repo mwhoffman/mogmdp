@@ -183,7 +183,7 @@ def get_gradient(model, policy, gamma, H):
     # the action minus the "predicted-action".
     M = np.c_[-policy.K, np.eye(model.na)]
     A = np.r_[np.c_[np.inner(policy.K, policy.K), -policy.K.T], M]
-    CC = np.trace(np.dot(A, ZZ)) + J*np.inner(policy.m, policy.m) - 2*np.inner(policy.m, np.dot(M, Z))
+    CC = np.trace(np.dot(A, ZZ)) + Js*np.inner(policy.m, policy.m) - 2*np.inner(policy.m, np.dot(M, Z))
 
     dK = (policy.sigma**-2) * UX - np.dot(policy.K, XX) - np.outer(policy.m, X)
     dm = (policy.sigma**-2) * U - np.dot(policy.K, X) - Js*policy.m
