@@ -24,15 +24,22 @@ for k in xrange(20):
 
 H = 20
 gamma = 0.95
-J, Z, ZZ = 0, 0, 0
+J, Js, Z, ZZ = 0, 0, 0, 0
+
+d = model.nx
+M = np.c_[-policy.K, np.eye(model.na)]
+A = np.r_[np.c_[np.inner(policy.K, policy.K), -policy.K.T], M]
 
 for n in xrange(H+1):
     for k in xrange(n, H+1):
-        c, mu, Sigma = mogmdp.get_moment(model, policy, 0.95, k, k-n)
+        c, mu_hat, Sigma_hat = mogmdp.get_moment(model, policy, 0.95, k, k-n)
         c *= gamma**k
-        Z += c*mu
-        ZZ += c*(Sigma + np.outer(mu, mu))
+        z, zz = mu_hat, (Sigma_hat + np.outer(mu_hat, mu_hat))
+
+        Z += c*z
+        ZZ += c*zz
+        Js += c
         J += c if (k==n) else 0
 
-for (a,b) in zip((J, Z, ZZ), mogmdp.get_moments(model, policy, gamma, H)):
+for (a,b) in zip((J, Js, Z, ZZ), mogmdp.get_moments(model, policy, gamma, H)):
     assert np.allclose(a, b)

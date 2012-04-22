@@ -83,67 +83,7 @@ class ForwardMessage(object):
         return self.__class__(mu, Sigma)
 
 #===================================================================================================
-# MESSAGE HANDLERS/SOLVERS.
-#===================================================================================================
-
-def get_expectations(policy, mu, Sigma):
-    # convert these intro matrices (while not copying) just so that they're
-    # easier to work with. it doesn't really use any additional memory anyways.
-    z = np.asmatrix(mu).T
-    S = np.asmatrix(Sigma)
-    zz = np.asmatrix(Sigma + z*z.T)
-
-    # given the mean and covariance get the sufficient statistics, i.e. single
-    # state/action expectations, expectations of state/action products, and
-    # finally the covariances (respectively).
-    nx = policy.nx
-    x, u = z[0:nx], z[nx:]
-    xx, uu, ux = zz[0:nx,0:nx], zz[nx:,nx:], zz[nx:,0:nx]
-    covx, covu, covxu = S[0:nx,0:nx], S[nx:,nx:], S[0:nx,nx:]
-
-    # finally, compute CC, the expectation of (u-Kx-m)'(u-Kx-m)
-    mt = u - policy.K*x
-    Kt = policy.K*covxu
-    St = covu - Kt.T - Kt + policy.K*covx*policy.K.T
-    CC = np.trace(St) + mt.T*mt - 2*np.dot(policy.m, mt) + np.dot(policy.m, policy.m)
-
-    # return everything, note it's still a matrix.
-    return (x,u,xx,uu,ux,CC)
-
-def get_messages(model, policy, H):
-    trans = ZTransition(model, policy)
-    A = [ForwardMessage.init(model, policy)]
-    B = [BackwardMessage.init(model)]
-    for k in xrange(H):
-        A.append(A[-1].get_next(trans))
-        B.append(B[-1].get_next(trans))
-    return A, B
-
-def get_gradient(model, policy, gamma, H):
-    A, B = get_messages(model, policy, H)
-    J, dJ = 0, 0
-
-    for k in xrange(H+1):
-        for n in xrange(k+1):
-            for i in xrange(model.nr):
-                # grab the mixture model.
-                (w,mu,Sigma) = get_alphabeta(A[n], B[k-n], i)
-                (x,u,xx,uu,ux,CC) = get_expectations(policy, mu, Sigma)
-
-                # compute the partial derivatives.
-                dK = (policy.sigma**-2) * np.array(ux - policy.K*xx - policy.m*x.T)
-                dm = (policy.sigma**-2) * np.array(u - policy.K*x - policy.m)
-                ds = (policy.sigma**-1) * np.array(policy.sigma**-2 * CC - model.na)
-
-                # put together the gradient.
-                w  *= (gamma ** k)
-                J  += w if (n == k) else 0
-                dJ += w * np.r_[dK.flatten(), dm.flatten(), ds.flatten()]
-
-    return J, dJ
-
-#===================================================================================================
-# New code to just compute the moments.
+# Code to compute the moments and the gradient.
 #===================================================================================================
 
 def kalman_update(model, alpha):
@@ -182,14 +122,18 @@ def get_moments(model, policy, gamma, H):
     # get the first components.
     c, mu_hat, Sigma_hat = kalman_update(model, forward[H])
     c *= gamma**H
+
+    # initialize the components we'll be using for the backward pass.
     mu = c*mu_hat
-    Omega = c*Sigma_hat + c*np.outer(mu_hat, mu_hat)
-    J, Z, ZZ = c, mu.copy(), Omega.copy()
+    Omega = c*np.outer(mu_hat, mu_hat)
+    Sigma = c*Sigma_hat
+
+    # initialize the accumulators.
+    J, Js, Z, ZZ = c, c, mu.copy(), Sigma + Omega
 
     for n in reversed(xrange(H)):
-        # this is the components of the forward messages and the backward
-        # messages respectively, i.e. the components corresponding to p(z_n) and
-        # p(z_n|y_n).
+        # these are the components of the forward messages and the backward
+        # messages respectively, i.e. p(z_n) and p(z_n|y_n).
         mu_fwd, Sigma_fwd = forward[n].mu, forward[n].Sigma
         c, mu_hat, Sigma_hat = kalman_update(model, forward[n])
         c *= gamma**n
@@ -204,17 +148,43 @@ def get_moments(model, policy, gamma, H):
         Gmu = np.dot(G, mu)
         mu = c*mu_hat + J*mu_rev + Gmu
 
-        # smoothing for the summation of the second moment.
+        # do the smoothing for the summation of the second moment, for which we
+        # get the covariance for free.
         a = np.outer(Gmu, mu_rev)
-        Omega_hat = Sigma_hat + np.outer(mu_hat, mu_hat)
-        Omega_rev = Sigma_fwd - np.dot(G, np.dot(P, G.T)) + np.outer(mu_rev, mu_rev)
+        Sigma_rev = Sigma_fwd - np.dot(G, np.dot(P, G.T))
+        Omega_hat = np.outer(mu_hat, mu_hat)
+        Omega_rev = np.outer(mu_rev, mu_rev)
+        Sigma = c*Sigma_hat + J*Sigma_rev + np.dot(G, np.dot(Sigma, G.T))
         Omega = c*Omega_hat + J*Omega_rev + np.dot(G, np.dot(Omega, G.T)) + a + a.T
 
         J += c
+        Js += J
         Z += mu
-        ZZ += Omega
+        ZZ += Sigma + Omega
 
-    return J, Z, ZZ
+    return J, Js, Z, ZZ
+
+def get_gradient(model, policy, gamma, H):
+    # get the expected return and the first/second moments in the joint
+    # state/action space.
+    J, Js, Z, ZZ = get_moments(model, policy, gamma, H)
+
+    # get the moments we're actually interested in.
+    nx = policy.nx
+    X, U = Z[0:nx], Z[nx:]
+    XX, UU, UX = ZZ[0:nx,0:nx], ZZ[nx:,nx:], ZZ[nx:,0:nx]
+
+    # and get the expectation of the inner product of C with itself, where C is
+    # the action minus the "predicted-action".
+    M = np.c_[-policy.K, np.eye(model.na)]
+    A = np.r_[np.c_[np.inner(policy.K, policy.K), -policy.K.T], M]
+    CC = np.trace(np.dot(A, ZZ)) + J*np.inner(policy.m, policy.m) - 2*np.inner(policy.m, np.dot(M, Z))
+
+    dK = (policy.sigma**-2) * UX - np.dot(policy.K, XX) - np.outer(policy.m, X)
+    dm = (policy.sigma**-2) * U - np.dot(policy.K, X) - Js*policy.m
+    ds = (policy.sigma**-1) * (policy.sigma**-2 * CC - Js*model.na)
+
+    return J, np.r_[dK.flatten(), dm.flatten(), ds]
 
 def get_moment(model, policy, gamma, H, tau):
     trans = ZTransition(model, policy)
@@ -235,4 +205,3 @@ def get_moment(model, policy, gamma, H, tau):
         Sigma = forward[n].Sigma + np.dot(G, np.dot(Sigma - P, G.T))
 
     return c, mu, Sigma
-
