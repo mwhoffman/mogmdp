@@ -197,4 +197,12 @@ def get_gradient(model, policy, gamma, H):
 
     return J, np.r_[dK.flatten(), dm.flatten(), ds]
 
+def get_emstep(model, policy, gamma, H):
+    # get the moments we're interested in.
+    J, Js, X, U, XX, UU, UX, CC = get_moments(model, policy, gamma, H)
 
+    K = scipy.linalg.solve(XX, UX - np.outer(policy.m, X), sym_pos=True, overwrite_b=True)
+    m = (U - np.dot(policy.K, X)) / Js
+    s = np.sqrt(CC / Js / model.na)
+
+    return J, np.r_[(K-policy.K).flatten(), (m-policy.m).flatten(), s-policy.sigma]
