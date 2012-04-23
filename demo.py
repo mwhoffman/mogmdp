@@ -35,7 +35,6 @@ obj = lambda theta: map(np.negative, fun(theta))
 
 bounds = [(None,None) for i in xrange(len(theta0)-1)] + [(sigma_min,None)]
 _, _, info = lbfgsb.lbfgsb(obj, theta0, bounds)
-thetas = np.array(info['xs'])
 
 pl.contour(X, Y, J)
-pl.plot(thetas[:,0], thetas[:,1], 'r-', lw=2)
+pl.plot(info['x'][:,0], info['x'][:,1], 'r-', lw=2)

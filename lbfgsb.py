@@ -21,12 +21,11 @@
 ## SOFTWARE.
 
 
-from numpy import zeros, float64, array, int32
+import numpy as np
 import scipy.optimize._lbfgsb as _lbfgsb
-import scipy.optimize
 
 def lbfgsb(func, x0,
-           bounds=None, m=10, factr=1e7, pgtol=1e-5, maxfun=15000):
+           bounds=None, m=10, factr=1e7, pgtol=1e-5, maxfun=100):
     """
     Minimize a function func using the L-BFGS-B algorithm.
 
@@ -76,9 +75,9 @@ def lbfgsb(func, x0,
     if bounds is None: bounds = [(None,None)] * n
     if len(bounds) != n: raise ValueError('length of x0 != length of bounds')
 
-    nbd = zeros((n,), int32)
-    low_bnd = zeros((n,), float64)
-    upper_bnd = zeros((n,), float64)
+    nbd = np.zeros((n,), np.int32)
+    low_bnd = np.zeros((n,), np.float64)
+    upper_bnd = np.zeros((n,), np.float64)
     bounds_map = {(None, None): 0, (1, None): 1, (1, 1): 2, (None, 1): 3}
 
     for i in range(0, n):
@@ -91,24 +90,27 @@ def lbfgsb(func, x0,
             u = 1
         nbd[i] = bounds_map[l, u]
 
-    wa = zeros((2*m*n+4*n + 12*m**2 + 12*m,), float64)
-    iwa = zeros((3*n,), int32)
-    task = zeros(1, 'S60')
-    csave = zeros(1,'S60')
-    lsave = zeros((4,), int32)
-    isave = zeros((44,), int32)
-    dsave = zeros((29,), float64)
+    wa  = np.zeros((2*m*n + 4*n + 12*m**2 + 12*m,), np.float64)
+    iwa = np.zeros((3*n,), np.int32)
+    task  = np.zeros(1, 'S60')
+    csave = np.zeros(1, 'S60')
+    lsave = np.zeros((4, ), np.int32)
+    isave = np.zeros((44,), np.int32)
+    dsave = np.zeros((29,), np.float64)
 
-    x = array(x0, float64)
+    # allocate space for our path.
+    ns = np.empty(maxfun+1, np.int32)
+    xs = np.empty((maxfun+1, n), np.float64)
+    fs = np.empty(maxfun+1, np.float64)
+    gs = np.empty((maxfun+1, n), np.float64)
+
+    # initialize the first step.
+    x = np.array(x0, np.float64)
     f, g = func(x)
-
-    ns = [0]
-    xs = [x.copy()]
-    fs = [f.copy()]
-    gs = [g.copy()]
-
-    task[:] = 'START'
+    ns[0], xs[0], fs[0], gs[0] = 0, x, f, g
+    i = 1
     numevals = 0
+    task[:] = 'START'
 
     while 1:
         _lbfgsb.setulb(m, x, low_bnd, upper_bnd, nbd, f, g, factr,
@@ -122,16 +124,17 @@ def lbfgsb(func, x0,
 
         elif task_str.startswith('NEW_X'):
             # new iteration
-            ns.append(numevals)
-            xs.append(x.copy())
-            fs.append(f.copy())
-            gs.append(g.copy())
-
+            ns[i], xs[i], fs[i], gs[i] = numevals, x, f, g
+            i += 1
             if numevals > maxfun:
                 task[:] = 'STOP: TOTAL NO. of f AND g EVALUATIONS EXCEEDS LIMIT'
         else:
             break
 
-    info = {'numevals': ns, 'xs': xs, 'fs': fs, 'gs': gs}
-    return x, f, info
+    ns.resize(i)
+    xs.resize((i, n))
+    fs.resize(i)
+    gs.resize((i, n))
+
+    return x, f, dict(numevals=ns, x=xs, f=fs, g=gs)
 
