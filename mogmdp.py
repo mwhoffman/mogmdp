@@ -114,6 +114,26 @@ def kalman_update(model, mu, Sigma):
 
     return mu, Sigma, c
 
+def kalman_smooth(zmodel, J, mu, Omega, mu_fwd, Sigma_fwd, mu_hat, Sigma_hat, c):
+    # get the components in order to do the smoothing step.
+    tmp = np.dot(zmodel.F, Sigma_fwd)
+    P = np.dot(tmp, zmodel.F.T) + zmodel.Sigma
+    G = sp.linalg.solve(P, tmp, sym_pos=True, overwrite_b=True).T
+
+    # do the smoothing for the summation of the first moment.
+    mu_rev = mu_fwd - np.dot(G, np.dot(zmodel.F, mu_fwd) + zmodel.m)
+    Gmu = np.dot(G, mu)
+    mu = c*mu_hat + J*mu_rev + Gmu
+
+    # do the smoothing for the summation of the second moment, for which we
+    # get the covariance for free.
+    a = np.outer(Gmu, mu_rev)
+    Omega_hat = np.outer(mu_hat, mu_hat) + Sigma_hat
+    Omega_rev = np.outer(mu_rev, mu_rev) + Sigma_fwd - np.dot(G, np.dot(P, G.T))
+    Omega = c*Omega_hat + J*Omega_rev + np.dot(G, np.dot(Omega, G.T)) + a + a.T
+
+    return mu, Omega
+
 def get_forward(model, policy, H):
     # get the Z-model from the model/policy and initialize the forward messages.
     zmodel = get_zmodel(model, policy)
@@ -128,54 +148,38 @@ def get_forward(model, policy, H):
 
 def get_zmoments(model, policy, gamma, H):
     forward, zmodel = get_forward(model, policy, H)
+    do_init = True
 
-    # get the first components.
-    mu_fwd, Sigma_fwd = forward[H]
-    mu_hat, Sigma_hat, c = kalman_update(model, mu_fwd, Sigma_fwd)
-
-    # initialize the components we'll be using for the backward pass.
-    c *= gamma**H
-    mu = c*mu_hat
-    Omega = c*np.outer(mu_hat, mu_hat) + c*Sigma_hat
-
-    # initialize the accumulators.
-    J, Js, Z, ZZ = c, c, mu.copy(), Omega.copy()
-
-    for n in reversed(xrange(H)):
-        # these are the components of the forward messages and the backward
-        # messages respectively, i.e. p(z_n) and p(z_n|y_n).
-        mu_fwd, Sigma_fwd = forward[n]
-        mu_hat, Sigma_hat, c = kalman_update(model, mu_fwd, Sigma_fwd)
-        c *= gamma**n
-
-        # get the components in order to do the smoothing step.
-        tmp = np.dot(zmodel.F, Sigma_fwd)
-        P = np.dot(tmp, zmodel.F.T) + zmodel.Sigma
+    for n in reversed(xrange(H+1)):
         try:
-            G = sp.linalg.solve(P, tmp, sym_pos=True, overwrite_b=True).T
+            # these are the components of the forward messages and the backward
+            # messages respectively, i.e. p(z_n) and p(y_n|z_n).
+            mu_fwd, Sigma_fwd = forward[n]
+            mu_hat, Sigma_hat, c = kalman_update(model, mu_fwd, Sigma_fwd)
+            c *= gamma**n
         except np.linalg.LinAlgError:
-            print 'WARNING: restarting backward-pass with horizon %d (instead of %d)' % (n, H)
-            mu = c*mu_hat
-            Omega = c*np.outer(mu_hat, mu_hat) + c*Sigma_hat
-            J, Js, Z, ZZ = c, c, mu.copy(), Omega.copy()
+            do_init = True
             continue
 
-        # do the smoothing for the summation of the first moment.
-        mu_rev = mu_fwd - np.dot(G, np.dot(zmodel.F, mu_fwd) + zmodel.m)
-        Gmu = np.dot(G, mu)
-        mu = c*mu_hat + J*mu_rev + Gmu
+        if do_init:
+            mu = c*mu_hat
+            Omega = c*np.outer(mu_hat, mu_hat) + c*Sigma_hat
+            J, Js, Z, ZZ = 0, 0, 0, 0
+            my_init, do_init = n, False
+        else:
+            try:
+                mu, Omega = kalman_smooth(zmodel, J, mu, Omega,
+                                          mu_fwd, Sigma_fwd,
+                                          mu_hat, Sigma_hat, c)
+            except np.linalg.LinAlgError:
+                do_init = True
+                continue
 
-        # do the smoothing for the summation of the second moment, for which we
-        # get the covariance for free.
-        a = np.outer(Gmu, mu_rev)
-        Omega_hat = np.outer(mu_hat, mu_hat) + Sigma_hat
-        Omega_rev = np.outer(mu_rev, mu_rev) + Sigma_fwd - np.dot(G, np.dot(P, G.T))
-        Omega = c*Omega_hat + J*Omega_rev + np.dot(G, np.dot(Omega, G.T)) + a + a.T
+        # the sum of all components from n to the horizon H.
+        J += c; Js += J; Z += mu; ZZ += Omega
 
-        J += c
-        Js += J
-        Z += mu
-        ZZ += Omega
+    # if my_init < H:
+    #     print 'WARNING: truncated horizon to %d (rather than %d)' % (n, H)
 
     return J, Js, Z, ZZ
 
