@@ -3,8 +3,7 @@ from __future__ import division
 import numpy as np
 import scipy as sp
 import scipy.linalg
-
-from collections import namedtuple
+import lbfgsb
 
 class MoGMDP(object):
     """Mixture of Gaussians MDP."""
@@ -30,19 +29,21 @@ class MoGMDP(object):
         self.nr = self.w.size
 
     def unpack_policy(self, theta):
-        theta = np.array(theta)
-        ell = self.nx * self.na
-        K = theta[0:ell].reshape(self.na, self.nx)
-        m = theta[ell:-1]
-        sigma = theta[-1]
-        return MoGPolicy(K, m, sigma)
+        policy = MoGPolicy.zero(self.nx, self.na)
+        policy.update(np.asarray(theta))
+        return policy
 
 class MoGPolicy(object):
-    def __init__(self, K, m, sigma):
-        self.K = np.array(K, ndmin=2)
-        self.m = np.array(m, ndmin=1)
+    def __init__(self, K, m, sigma, copy=True):
+        self.K = np.array(K, ndmin=2, copy=copy)
+        self.m = np.array(m, ndmin=1, copy=copy)
         self.sigma = sigma
         self.na, self.nx = self.K.shape
+        self.nd = self.K.size + self.m.size + 1
+
+    @classmethod
+    def zero(cls, nx, na):
+        return cls(np.zeros((na,nx)), np.zeros(na), 0.0)
 
     def dlogpi(self, x, u):
         n = x.shape[0]
@@ -52,8 +53,17 @@ class MoGPolicy(object):
         ds = self.sigma**(-3) * sum(A**2, axis=1).reshape(n,-1) - self.na/self.sigma
         return np.c_[dK, dm, ds]
 
+    def copy(self):
+        return MoGPolicy(self.K, self.m, self.sigma)
+
     def pack(self):
         return np.r_[self.K.flatten(), self.m.flatten(), self.sigma]
+
+    def update(self, dtheta):
+        ell = self.nx * self.na
+        self.K += dtheta[0:ell].reshape(self.na, self.nx)
+        self.m += dtheta[ell:-1]
+        self.sigma += dtheta[-1]
 
 #===================================================================================================
 # Code to get the state/action transition and initial "state" models.
@@ -226,3 +236,40 @@ def get_emstep(model, policy, gamma, H):
     s = np.sqrt(CC / Js / model.na)
 
     return J, np.r_[(K-policy.K).flatten(), (m-policy.m).flatten(), s-policy.sigma]
+
+def solve_mogmdp_em(model, policy, gamma, H, maxfun=100):
+    ns = np.arange(maxfun+1, dtype=np.int32)
+    xs = np.empty((maxfun+1, policy.nd), np.float64)
+    fs = np.empty(maxfun+1, np.float64)
+
+    policy = policy.copy()
+    for i in xrange(maxfun):
+        xs[i] = policy.pack()
+        fs[i], dtheta = get_emstep(model, policy, gamma, H)
+        policy.update(dtheta)
+    xs[maxfun] = policy.pack()
+    fs[maxfun] = get_jtheta(model, policy, gamma, H)
+
+    return fs[-1], xs[-1], dict(numevals=ns, theta=xs, jtheta=fs)
+
+def solve_mogmdp(model, policy, gamma, H, sigma_min=0.1, em=False):
+    # get the initial parameter vector and any bounds.
+    theta0 = policy.pack()
+    bounds = [(None,None) for i in xrange(len(theta0)-1)] + [(sigma_min,None)]
+
+    # get the objective function.
+    fun = get_emstep if em else get_gradient
+    obj = lambda theta: map(np.negative, fun(model, model.unpack_policy(theta), gamma, H))
+
+    # solve the problem.
+    J, theta, info = lbfgsb.lbfgsb(obj, theta0, bounds)
+
+    # just rename the info elements to be more policy-gradient-y.
+    info[ 'theta'] = info['x']; del info['x']
+    info['jtheta'] = info['f']; del info['f']
+    info['dtheta'] = info['g']; del info['g']
+
+    info['jtheta'] *= -1
+    info['dtheta'] *= -1
+
+    return -J, theta, info
