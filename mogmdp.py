@@ -59,23 +59,21 @@ class MoGPolicy(object):
 # Code to get the state/action transition and initial "state" models.
 #===================================================================================================
 
-ZModel = namedtuple('ZModel', 'mu0, Sigma0, F, m, Sigma')
+class ZModel(object):
+    def __init__(self, model, policy):
+        ISigma = np.eye(model.na) * policy.sigma**2
+        KSigma = np.dot(policy.K, model.Sigma)
+        KSigma0 = np.dot(policy.K, model.Sigma0)
 
-def get_zmodel(model, policy):
-    ISigma = np.eye(model.na) * policy.sigma**2
-    KSigma = np.dot(policy.K, model.Sigma)
-    KSigma0 = np.dot(policy.K, model.Sigma0)
+        self.mu0 = np.r_[model.mu0, np.dot(policy.K, model.mu0) + policy.m]
+        self.Sigma0 = np.r_[np.c_[model.Sigma0, KSigma0.T],
+                            np.c_[KSigma0, np.dot(KSigma0, policy.K.T) + ISigma]]
 
-    mu0 = np.r_[model.mu0, np.dot(policy.K, model.mu0) + policy.m]
-    Sigma0 = np.r_[np.c_[model.Sigma0, KSigma0.T],
-                   np.c_[KSigma0, np.dot(KSigma0, policy.K.T) + ISigma]]
-
-    F = np.r_[np.c_[model.A, model.B], np.c_[np.dot(policy.K, model.A), np.dot(policy.K, model.B)]]
-    m = np.r_[np.zeros(model.nx), policy.m]
-    Sigma = np.r_[np.c_[model.Sigma, KSigma.T],
-                  np.c_[KSigma, np.dot(KSigma, policy.K.T) + ISigma]]
-
-    return ZModel(mu0, Sigma0, F, m, Sigma)
+        self.F = np.r_[np.c_[model.A, model.B],
+                       np.c_[np.dot(policy.K, model.A), np.dot(policy.K, model.B)]]
+        self.m = np.r_[np.zeros(model.nx), policy.m]
+        self.Sigma = np.r_[np.c_[model.Sigma, KSigma.T],
+                           np.c_[KSigma, np.dot(KSigma, policy.K.T) + ISigma]]
 
 #===================================================================================================
 # Code to compute the moments and the gradient.
@@ -136,7 +134,7 @@ def kalman_smooth(zmodel, J, mu, Omega, mu_fwd, Sigma_fwd, mu_hat, Sigma_hat, c)
 
 def get_forward(model, policy, H):
     # get the Z-model from the model/policy and initialize the forward messages.
-    zmodel = get_zmodel(model, policy)
+    zmodel = ZModel(model, policy)
     forward = [None] * (H+1)
     forward[0] = (zmodel.mu0, zmodel.Sigma0)
 
