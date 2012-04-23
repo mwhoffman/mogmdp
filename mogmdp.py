@@ -1,3 +1,8 @@
+"""
+Module to analytically solve MDPs using an EM-based algorithm for models with
+linear-Gaussian transitions and rewards which are a mixture-of-Gaussians.
+"""
+
 from __future__ import division
 
 import numpy as np
@@ -5,8 +10,22 @@ import scipy as sp
 import scipy.linalg
 import lbfgsb
 
+__all__ = ['MoGMDP', 'MoGPolicy', 'solve_mogmdp', 'solve_mogmdp_em']
+
+#===================================================================================================
+# classes for the mixture-of-Gaussians model, the corresponding policy, and the
+# transition model in the joint state/action space.
+#===================================================================================================
+
 class MoGMDP(object):
-    """Mixture of Gaussians MDP."""
+    """
+    Model for the mixture-of-Gaussians MDP. This class basically just acts as a
+    structure containing the model parameters: (mu0, Sigma0) for the initial
+    state distribution; (A, B, Sigma) for the transition distribution; and
+    (w, y, L, M) for the reward model.
+
+    See the paper for more details.
+    """
 
     def __init__(self, mu0, Sigma0, A, B, Sigma, w, y, L, M):
         # the initial state model.
@@ -29,11 +48,16 @@ class MoGMDP(object):
         self.nr = self.w.size
 
     def unpack_policy(self, theta):
+        """Return a policy object parameterized by the vector `theta`."""
         policy = MoGPolicy.zero(self.nx, self.na)
         policy.update(np.asarray(theta))
         return policy
 
 class MoGPolicy(object):
+    """
+    Policy object for the mixture-of-Gaussians MDP. Like the MDP object this
+    acts as a structure for the policy parameters (K, m, sigma).
+    """
     def __init__(self, K, m, sigma, copy=True):
         self.K = np.array(K, ndmin=2, copy=copy)
         self.m = np.array(m, ndmin=1, copy=copy)
@@ -43,9 +67,19 @@ class MoGPolicy(object):
 
     @classmethod
     def zero(cls, nx, na):
-        return cls(np.zeros((na,nx)), np.zeros(na), 0.0)
+        """
+        Class method to create a new policy with all parameters set to zero.
+        This is mostly useful for creating an empty policy and then adding to
+        the parameter vector using `update()`.
+        """
+        return cls(np.zeros((na,nx)), np.zeros(na), 0.0, copy=False)
 
     def dlogpi(self, x, u):
+        """
+        Evaluate the immediate policy-gradient on n state/action pairs,
+        collected in the vectors `x` and `u`. These should be arrays of size
+        (n,nx) and (n,nu) respectively.
+        """
         n = x.shape[0]
         A = u - np.dot(x, self.K.T) - self.m.reshape(1,-1)
         dK = self.sigma**(-2) * oprod(A, x).reshape(n,-1)
@@ -54,22 +88,27 @@ class MoGPolicy(object):
         return np.c_[dK, dm, ds]
 
     def copy(self):
+        """Return a copy of the policy object."""
         return MoGPolicy(self.K, self.m, self.sigma)
 
     def pack(self):
+        """Return the policy parameters as a vector."""
         return np.r_[self.K.flatten(), self.m.flatten(), self.sigma]
 
     def update(self, dtheta):
+        """Update the policy in-place given a vector in parameter space."""
         ell = self.nx * self.na
         self.K += dtheta[0:ell].reshape(self.na, self.nx)
         self.m += dtheta[ell:-1]
         self.sigma += dtheta[-1]
 
-#===================================================================================================
-# Code to get the state/action transition and initial "state" models.
-#===================================================================================================
-
 class ZModel(object):
+    """
+    Given a mixture-of-Gaussians MDP model and a policy object we can construct
+    a linear-Gaussian model in the joint state/action space. This class acts a
+    struct containing this model with initial states parameterized by
+    (mu0, Sigma0) and transitions (F, m, Sigma).
+    """
     def __init__(self, model, policy):
         ISigma = np.eye(model.na) * policy.sigma**2
         KSigma = np.dot(policy.K, model.Sigma)
@@ -85,16 +124,28 @@ class ZModel(object):
         self.Sigma = np.r_[np.c_[model.Sigma, KSigma.T],
                            np.c_[KSigma, np.dot(KSigma, policy.K.T) + ISigma]]
 
+
 #===================================================================================================
-# Code to compute the moments and the gradient.
+# Code to compute the moments, i.e. E[Z], E[ZZ'] and E[C'C].
 #===================================================================================================
 
 def kalman_predict(zmodel, mu, Sigma):
+    """
+    Given a state/action space transition model and a Gaussian in this space
+    parameterized by (mu, Sigma) return an updated Gaussian corresponding to
+    the prediction step of the Kalman filter.
+    """
     mu = np.dot(zmodel.F, mu) + zmodel.m
     Sigma = np.dot(np.dot(zmodel.F, Sigma), zmodel.F.T) + zmodel.Sigma
     return (mu, Sigma)
 
 def kalman_update(model, mu, Sigma):
+    """
+    Given the reward model and a Gaussian in the state/action space return
+    (mu, Sigma, c) corresponding to the update step of the Kalman filter. Here
+    c corresponds to the "likelihood" of the observation, i.e. the expected
+    reward.
+    """
     y, M, L = model.y[0], model.M[0], model.L[0]
 
     # FIXME: I'm currently just using the first component, of the reward
@@ -123,6 +174,16 @@ def kalman_update(model, mu, Sigma):
     return mu, Sigma, c
 
 def kalman_smooth(zmodel, J, mu, Omega, mu_fwd, Sigma_fwd, mu_hat, Sigma_hat, c):
+    """
+    This performs Kalman smoothing for the mixture-of-Gaussians MDP. Returns a
+    tuple (mu, Omega) corresponding to the smoothed sum of moments.
+
+    In more detail, the (mu_*, Sigma_*) parameters along with c correspond to
+    the results of the prediction and update steps at some time n. This differs
+    from the standard Kalman smoother in that we are smoothing the summation of
+    the first/second moments. Here J is the sum of all future rewards and (mu,
+    Omega) are the smoothed moments from the next step.
+    """
     # get the components in order to do the smoothing step.
     tmp = np.dot(zmodel.F, Sigma_fwd)
     P = np.dot(tmp, zmodel.F.T) + zmodel.Sigma
@@ -143,6 +204,11 @@ def kalman_smooth(zmodel, J, mu, Omega, mu_fwd, Sigma_fwd, mu_hat, Sigma_hat, c)
     return mu, Omega
 
 def get_forward(model, policy, H):
+    """
+    Given a model and policy, return a list of forward messages as (mu, Sigma)
+    tuples up to time-horizon H. This also returns the state/action transition
+    model used to generate these messages.
+    """
     # get the Z-model from the model/policy and initialize the forward messages.
     zmodel = ZModel(model, policy)
     forward = [None] * (H+1)
@@ -155,6 +221,12 @@ def get_forward(model, policy, H):
     return forward, zmodel
 
 def get_zmoments(model, policy, gamma, H):
+    """
+    Given a model, policy, discount factor gamma, and horizon H, return the
+    necessary moments in the joint state/action space. This will return
+    (J, Js, Z, ZZ) corresponding to the expected reward, sum of expected rewards
+    at each time-horizon, and the first/second moments.
+    """
     forward, zmodel = get_forward(model, policy, H)
     do_init = True
 
@@ -191,21 +263,16 @@ def get_zmoments(model, policy, gamma, H):
 
     return J, Js, Z, ZZ
 
-def get_jtheta(model, policy, gamma, H):
-    forward, _ = get_forward(model, policy, H)
-    J = 0.0
-    for n in reversed(xrange(H)):
-        _, _, c = kalman_update(model, *forward[n])
-        J += gamma**n * c
-    return J
-
 def get_moments(model, policy, gamma, H):
-    # get the expected return and the first/second moments in the joint
-    # state/action space.
-    J, Js, Z, ZZ = get_zmoments(model, policy, gamma, H)
-
+    """
+    Get the necessary moments in the individual state and action spaces.
+    Returns a tuple (J, Js, X, U, XX, UU, UX, CC) corresponding the the
+    expected reward, the sum of expected rewards at each time-horizon, and the
+    necessary moments.
+    """
     # get the moments we're actually interested in.
     nx = policy.nx
+    J, Js, Z, ZZ = get_zmoments(model, policy, gamma, H)
     X, U = Z[0:nx], Z[nx:]
     XX, UU, UX = ZZ[0:nx,0:nx], ZZ[nx:,nx:], ZZ[nx:,0:nx]
 
@@ -217,7 +284,31 @@ def get_moments(model, policy, gamma, H):
 
     return J, Js, X, U, XX, UU, UX, CC
 
+
+#===================================================================================================
+# Code to solve MoGMDP problem using either the plain EM algorithm or the
+# better performing gradient-based algorithms. This includes functions to
+# compute the gradients/steps, all of which are based on the moment
+# calculations from the previous section.
+#===================================================================================================
+
+def get_jtheta(model, policy, gamma, H):
+    """
+    Get the expected reward of the model and policy using discount factor gamma
+    and time-horizon H.
+    """
+    forward, _ = get_forward(model, policy, H)
+    J = 0.0
+    for n in reversed(xrange(H)):
+        _, _, c = kalman_update(model, *forward[n])
+        J += gamma**n * c
+    return J
+
 def get_gradient(model, policy, gamma, H):
+    """
+    Evaluate the gradient of the expected reward under some given policy and
+    return a tuple (J, g) containing the reward and this gradient.
+    """
     # get the moments we're interested in.
     J, Js, X, U, XX, UU, UX, CC = get_moments(model, policy, gamma, H)
 
@@ -228,6 +319,11 @@ def get_gradient(model, policy, gamma, H):
     return J, np.r_[dK.flatten(), dm.flatten(), ds]
 
 def get_emstep(model, policy, gamma, H):
+    """
+    Evaluate the next iteration of the EM algorithm given some policy and
+    return a tuple (J, d) corresponding to the expected reward along with the
+    step taken by EM.
+    """
     # get the moments we're interested in.
     J, Js, X, U, XX, UU, UX, CC = get_moments(model, policy, gamma, H)
 
@@ -238,6 +334,11 @@ def get_emstep(model, policy, gamma, H):
     return J, np.r_[(K-policy.K).flatten(), (m-policy.m).flatten(), s-policy.sigma]
 
 def solve_mogmdp_em(model, policy, gamma, H, maxfun=100):
+    """
+    Solve the model using EM using some initial policy, discount factor gamma,
+    and a time-horizon of H. Returns a tuple (theta, jtheta, info) where info
+    is a dictionary containing extra information (i.e. per-iteration, etc.).
+    """
     ns = np.arange(maxfun+1, dtype=np.int32)
     xs = np.empty((maxfun+1, policy.nd), np.float64)
     fs = np.empty(maxfun+1, np.float64)
@@ -250,9 +351,18 @@ def solve_mogmdp_em(model, policy, gamma, H, maxfun=100):
     xs[maxfun] = policy.pack()
     fs[maxfun] = get_jtheta(model, policy, gamma, H)
 
-    return fs[-1], xs[-1], dict(numevals=ns, theta=xs, jtheta=fs)
+    return xs[-1], fs[-1], dict(numevals=ns, theta=xs, jtheta=fs)
 
 def solve_mogmdp(model, policy, gamma, H, sigma_min=0.1, em=False):
+    """
+    Solve the model using gradient-based methods using some initial policy,
+    discount factor gamma, and a time-horizon of H. Returns a tuple (theta,
+    jtheta, info) where info is a dictionary containing extra information (i.e.
+    per-iteration, etc.).
+    
+    If `em` is True this will use a pseudo-gradient given by the EM steps,
+    otherwise it will directly optimize using the gradient returned by EM.
+    """
     # get the initial parameter vector and any bounds.
     theta0 = policy.pack()
     bounds = [(None,None) for i in xrange(len(theta0)-1)] + [(sigma_min,None)]
@@ -272,4 +382,4 @@ def solve_mogmdp(model, policy, gamma, H, sigma_min=0.1, em=False):
     info['jtheta'] *= -1
     info['dtheta'] *= -1
 
-    return -J, theta, info
+    return theta, -J, info
