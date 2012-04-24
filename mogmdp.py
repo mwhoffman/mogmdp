@@ -47,6 +47,24 @@ class MoGMDP(object):
         self.nx, self.na = self.B.shape
         self.nr = self.w.size
 
+        # Cache the cholesky decompositions. NOTE: these are upper triangular!
+        self.cholSigma0 = sp.linalg.cholesky(self.Sigma0)
+        self.cholSigma  = sp.linalg.cholesky(self.Sigma)
+        self.cholL = [sp.linalg.cho_factor(Li)[0] for Li in self.L]
+
+    def sample_init(self, n):
+        return self.mu0 + np.dot(np.random.normal(size=(n, self.nx)), self.cholSigma0)
+
+    def sample_next(self, x, u):
+        z = np.c_[x, u]
+        r = 0.0
+        for w, y, M, cholL in zip(self.w, self.y, self.M, self.cholL):
+            a = sp.linalg.solve_triangular(cholL, (y - np.dot(z, M.T)).T, trans=1)
+            r += w * np.exp(-0.5 * np.sum(a**2, axis=0))
+        xn = np.dot(x, self.A.T) + np.dot(u, self.B.T)
+        xn += np.dot(np.random.normal(size=x.shape), self.cholSigma)
+        return xn, r
+
     def unpack_policy(self, theta):
         """Return a policy object parameterized by the vector `theta`."""
         policy = MoGPolicy.zero(self.nx, self.na)
@@ -73,6 +91,9 @@ class MoGPolicy(object):
         the parameter vector using `update()`.
         """
         return cls(np.zeros((na,nx)), np.zeros(na), 0.0, copy=False)
+
+    def sample(self, x):
+        return self.m + np.dot(x, self.K.T) + np.random.normal(size=x.shape, scale=self.sigma)
 
     def dlogpi(self, x, u):
         """
