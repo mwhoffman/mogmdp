@@ -51,6 +51,7 @@ class MoGMDP(object):
         self.cholSigma0 = sp.linalg.cholesky(self.Sigma0)
         self.cholSigma  = sp.linalg.cholesky(self.Sigma)
         self.cholL = [sp.linalg.cho_factor(Li)[0] for Li in self.L]
+        self.logDetL = [2*np.sum(np.log(np.diag(cholL))) for cholL in self.cholL]
 
     def sample_init(self, n):
         return self.mu0 + np.dot(np.random.normal(size=(n, self.nx)), self.cholSigma0)
@@ -160,41 +161,38 @@ def kalman_predict(zmodel, (mu, Sigma)):
     Sigma = np.dot(np.dot(zmodel.F, Sigma), zmodel.F.T) + zmodel.Sigma
     return (mu, Sigma)
 
-def kalman_update(model, gamma, (mu, Sigma)):
+def kalman_update(model, gamma, (mu_fwd, Sigma_fwd)):
     """
     Given the reward model and a Gaussian in the state/action space return
     (mu, Sigma, c) corresponding to the update step of the Kalman filter. Here
     c corresponds to the "likelihood" of the observation, i.e. the expected
     reward.
     """
-    y, M, L = model.y[0], model.M[0], model.L[0]
-
-    # FIXME: I'm currently just using the first component, of the reward
-    # model, and I'm ignoring the weights w, i.e. just assuming they're one.
-
-    # get the innovation r, i.e. the difference between the "observed" y
-    # and the prediction; the cholesky of the innovation covariance cholS;
-    # and the log-determinant of this covariance.
     d = model.nx + model.na
-    r = y - np.dot(M, mu)
-    cholS, _ = sp.linalg.cho_factor(np.dot(M, np.dot(Sigma, M.T)) + L, overwrite_a=True)
-    logDetS = 2*np.sum(np.log(np.diag(cholS)))
+    mu, Omega, c = 0, 0, 0
 
-    # get the Kalman gain and get the updated mean/variance.
-    K = sp.linalg.cho_solve((cholS, False), np.dot(M, Sigma), overwrite_b=True).T
-    mu = mu + np.dot(K, r)
-    Omega = np.dot(np.eye(d) - np.dot(K, M), Sigma) + np.outer(mu, mu)
+    for (y,M,L,logDetL) in zip(model.y, model.M, model.L, model.logDetL):
+        # get the innovation r, i.e. the difference between the "observed" y
+        # and the prediction; the cholesky of the innovation covariance cholS;
+        # and the log-determinant of this covariance.
+        r = y - np.dot(M, mu_fwd)
+        cholS, _ = sp.linalg.cho_factor(np.dot(M, np.dot(Sigma_fwd, M.T)) + L, overwrite_a=True)
+        logDetS = 2*np.sum(np.log(np.diag(cholS)))
 
-    # this is the "likelihood" term, which corresponds to the reward. since
-    # we're using unnormalized Gaussians we don't include the 2*pi term, and we
-    # subtract off the normalizing constant involving L.
-    c = np.sum(sp.linalg.solve_triangular(cholS, r, trans=1)**2)
-    c += logDetS - np.log(np.linalg.det(L))
-    c = np.exp(-0.5*c)
+        # get the Kalman gain and get the updated mean/variance.
+        K = sp.linalg.cho_solve((cholS, False), np.dot(M, Sigma_fwd), overwrite_b=True).T
+        mu_ = mu_fwd + np.dot(K, r)
+        Omega_ = np.dot(np.eye(d) - np.dot(K, M), Sigma_fwd) + np.outer(mu_, mu_)
 
-    c *= gamma
-    mu *= c
-    Omega *= c
+        # this is the "likelihood" term, which corresponds to the reward. since
+        # we're using unnormalized Gaussians we don't include the 2*pi term, and we
+        # subtract off the normalizing constant involving L.
+        c_ = np.sum(sp.linalg.solve_triangular(cholS, r, trans=1)**2) + logDetS - logDetL
+        c_ = gamma * np.exp(-0.5*c_)
+
+        mu += c_ * mu_
+        Omega += c_ * Omega_
+        c += c_
 
     return mu, Omega, c
 
