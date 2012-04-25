@@ -160,7 +160,7 @@ def kalman_predict(zmodel, mu, Sigma):
     Sigma = np.dot(np.dot(zmodel.F, Sigma), zmodel.F.T) + zmodel.Sigma
     return (mu, Sigma)
 
-def kalman_update(model, mu, Sigma):
+def kalman_update(model, gamma, (mu, Sigma)):
     """
     Given the reward model and a Gaussian in the state/action space return
     (mu, Sigma, c) corresponding to the update step of the Kalman filter. Here
@@ -183,7 +183,7 @@ def kalman_update(model, mu, Sigma):
     # get the Kalman gain and get the updated mean/variance.
     K = sp.linalg.cho_solve((cholS, False), np.dot(M, Sigma), overwrite_b=True).T
     mu = mu + np.dot(K, r)
-    Sigma = np.dot(np.eye(d) - np.dot(K, M), Sigma)
+    Omega = np.dot(np.eye(d) - np.dot(K, M), Sigma) + np.outer(mu, mu)
 
     # this is the "likelihood" term, which corresponds to the reward. since
     # we're using unnormalized Gaussians we don't include the 2*pi term, and we
@@ -192,9 +192,13 @@ def kalman_update(model, mu, Sigma):
     c += logDetS - np.log(np.linalg.det(L))
     c = np.exp(-0.5*c)
 
-    return mu, Sigma, c
+    c *= gamma
+    mu *= c
+    Omega *= c
 
-def kalman_smooth(zmodel, J, mu, Omega, mu_fwd, Sigma_fwd, mu_hat, Sigma_hat, c):
+    return mu, Omega, c
+
+def kalman_smooth(zmodel, J, mu, Omega, mu_fwd, Sigma_fwd, mu_til, Omega_til):
     """
     This performs Kalman smoothing for the mixture-of-Gaussians MDP. Returns a
     tuple (mu, Omega) corresponding to the smoothed sum of moments.
@@ -213,14 +217,13 @@ def kalman_smooth(zmodel, J, mu, Omega, mu_fwd, Sigma_fwd, mu_hat, Sigma_hat, c)
     # do the smoothing for the summation of the first moment.
     mu_rev = mu_fwd - np.dot(G, np.dot(zmodel.F, mu_fwd) + zmodel.m)
     Gmu = np.dot(G, mu)
-    mu = c*mu_hat + J*mu_rev + Gmu
+    mu = mu_til + J*mu_rev + Gmu
 
     # do the smoothing for the summation of the second moment, for which we
     # get the covariance for free.
     a = np.outer(Gmu, mu_rev)
-    Omega_hat = np.outer(mu_hat, mu_hat) + Sigma_hat
     Omega_rev = np.outer(mu_rev, mu_rev) + Sigma_fwd - np.dot(G, np.dot(P, G.T))
-    Omega = c*Omega_hat + J*Omega_rev + np.dot(G, np.dot(Omega, G.T)) + a + a.T
+    Omega = Omega_til + J*Omega_rev + np.dot(G, np.dot(Omega, G.T)) + a + a.T
 
     return mu, Omega
 
@@ -256,22 +259,18 @@ def get_zmoments(model, policy, gamma, H):
             # these are the components of the forward messages and the backward
             # messages respectively, i.e. p(z_n) and p(y_n|z_n).
             mu_fwd, Sigma_fwd = forward[n]
-            mu_hat, Sigma_hat, c = kalman_update(model, mu_fwd, Sigma_fwd)
-            c *= gamma**n
+            mu_til, Omega_til, c = kalman_update(model, gamma**n, (mu_fwd, Sigma_fwd))
         except np.linalg.LinAlgError:
             do_init = True
             continue
 
         if do_init:
-            mu = c*mu_hat
-            Omega = c*np.outer(mu_hat, mu_hat) + c*Sigma_hat
+            mu, Omega = mu_til, Omega_til
             J, Js, Z, ZZ = 0, 0, 0, 0
             my_init, do_init = n, False
         else:
             try:
-                mu, Omega = kalman_smooth(zmodel, J, mu, Omega,
-                                          mu_fwd, Sigma_fwd,
-                                          mu_hat, Sigma_hat, c)
+                mu, Omega = kalman_smooth(zmodel, J, mu, Omega, mu_fwd, Sigma_fwd, mu_til, Omega_til)
             except np.linalg.LinAlgError:
                 do_init = True
                 continue
@@ -321,8 +320,8 @@ def get_jtheta(model, policy, gamma, H):
     forward, _ = get_forward(model, policy, H)
     J = 0.0
     for n in reversed(xrange(H)):
-        _, _, c = kalman_update(model, *forward[n])
-        J += gamma**n * c
+        _, _, c = kalman_update(model, gamma**n, forward[n])
+        J += c
     return J
 
 def get_gradient(model, policy, gamma, H):
