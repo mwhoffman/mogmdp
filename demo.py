@@ -11,10 +11,10 @@ params['Sigma0'] = 0.5
 params['A'] = 1.0
 params['B'] = 1.0
 params['Sigma'] = 0.3
-params['w'] = 1.0
-params['y'] = [3.,0.]
-params['M'] = 3*np.eye(2)
-params['L'] = 2*np.eye(2)
+params['w'] = [1.0, -.5]
+params['y'] = [[3.,0.], [2.,0.]]
+params['M'] = [3*np.eye(2), np.eye(2)]
+params['L'] = [2*np.eye(2), np.eye(2)]
 
 H = 50
 gamma = 0.95
@@ -45,7 +45,6 @@ pl.contour(X, Y, J)
 pl.plot(info_pem['theta'][:,0], info_pem['theta'][:,1], 'r-', lw=2)
 pl.title('LBFGS-EM')
 
-pl.figure()
 pl.subplot(2,2,3)
 pl.contour(X, Y, J)
 pl.plot(info_em['theta'][:,0], info_em['theta'][:,1], 'r-', lw=2)
