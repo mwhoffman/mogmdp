@@ -18,8 +18,8 @@ params['L'] = [2*np.eye(2), np.eye(2)]
 
 H = 50
 gamma = 0.95
-sigma_min = 0.1
-theta0 = [-1.8, -0.3, 1.0]
+sigma_min = 0.001
+theta0 = [-.8, -0.0, 1.0]
 
 model = mogmdp.MoGMDP(**params)
 policy0 = model.unpack_policy(theta0)
@@ -30,8 +30,8 @@ J = np.empty(X.shape)
 for i, (K, m) in enumerate(zip(X.flat, Y.flat)):
     J.flat[i] = mogmdp.get_jtheta(model, model.unpack_policy([K, m, sigma_min]), gamma, H)
 
-_, _, info_gem = mogmdp.solve_mogmdp(model, policy0, gamma, H)
-_, _, info_pem = mogmdp.solve_mogmdp(model, policy0, gamma, H, em=True)
+_, _, info_gem = mogmdp.solve_mogmdp(model, policy0, gamma, H, sigma_min)
+_, _, info_pem = mogmdp.solve_mogmdp(model, policy0, gamma, H, sigma_min, em=True)
 _, _, info_em  = mogmdp.solve_mogmdp_em(model, policy0, gamma, H, maxfun=50)
 
 pl.figure()
