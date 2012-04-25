@@ -150,7 +150,7 @@ class ZModel(object):
 # Code to compute the moments, i.e. E[Z], E[ZZ'] and E[C'C].
 #===================================================================================================
 
-def kalman_predict(zmodel, mu, Sigma):
+def kalman_predict(zmodel, (mu, Sigma)):
     """
     Given a state/action space transition model and a Gaussian in this space
     parameterized by (mu, Sigma) return an updated Gaussian corresponding to
@@ -198,51 +198,35 @@ def kalman_update(model, gamma, (mu, Sigma)):
 
     return mu, Omega, c
 
-def kalman_smooth(zmodel, J, mu, Omega, mu_fwd, Sigma_fwd, mu_til, Omega_til):
+def kalman_smooth(model, zmodel, J, mu, Omega, gamma, (mu_fwd, Sigma_fwd), init):
     """
     This performs Kalman smoothing for the mixture-of-Gaussians MDP. Returns a
     tuple (mu, Omega) corresponding to the smoothed sum of moments.
-
-    In more detail, the (mu_*, Sigma_*) parameters along with c correspond to
-    the results of the prediction and update steps at some time n. This differs
-    from the standard Kalman smoother in that we are smoothing the summation of
-    the first/second moments. Here J is the sum of all future rewards and (mu,
-    Omega) are the smoothed moments from the next step.
     """
-    # get the components in order to do the smoothing step.
-    tmp = np.dot(zmodel.F, Sigma_fwd)
-    P = np.dot(tmp, zmodel.F.T) + zmodel.Sigma
-    G = sp.linalg.solve(P, tmp, sym_pos=True, overwrite_b=True).T
+    # get the first/second moments at the current horizon.
+    mu_til, Omega_til, c = kalman_update(model, gamma, (mu_fwd, Sigma_fwd))
 
-    # do the smoothing for the summation of the first moment.
-    mu_rev = mu_fwd - np.dot(G, np.dot(zmodel.F, mu_fwd) + zmodel.m)
-    Gmu = np.dot(G, mu)
-    mu = mu_til + J*mu_rev + Gmu
+    if init:
+        mu, Omega = mu_til, Omega_til
 
-    # do the smoothing for the summation of the second moment, for which we
-    # get the covariance for free.
-    a = np.outer(Gmu, mu_rev)
-    Omega_rev = np.outer(mu_rev, mu_rev) + Sigma_fwd - np.dot(G, np.dot(P, G.T))
-    Omega = Omega_til + J*Omega_rev + np.dot(G, np.dot(Omega, G.T)) + a + a.T
+    else:
+        # get the components in order to do the smoothing step.
+        tmp = np.dot(zmodel.F, Sigma_fwd)
+        P = np.dot(tmp, zmodel.F.T) + zmodel.Sigma
+        G = sp.linalg.solve(P, tmp, sym_pos=True, overwrite_b=True).T
 
-    return mu, Omega
+        # do the smoothing for the summation of the first moment.
+        mu_rev = mu_fwd - np.dot(G, np.dot(zmodel.F, mu_fwd) + zmodel.m)
+        Gmu = np.dot(G, mu)
+        mu = mu_til + J*mu_rev + Gmu
 
-def get_forward(model, policy, H):
-    """
-    Given a model and policy, return a list of forward messages as (mu, Sigma)
-    tuples up to time-horizon H. This also returns the state/action transition
-    model used to generate these messages.
-    """
-    # get the Z-model from the model/policy and initialize the forward messages.
-    zmodel = ZModel(model, policy)
-    forward = [None] * (H+1)
-    forward[0] = (zmodel.mu0, zmodel.Sigma0)
+        # do the smoothing for the summation of the second moment, for which we
+        # get the covariance for free.
+        a = np.outer(Gmu, mu_rev)
+        Omega_rev = np.outer(mu_rev, mu_rev) + Sigma_fwd - np.dot(G, np.dot(P, G.T))
+        Omega = Omega_til + J*Omega_rev + np.dot(G, np.dot(Omega, G.T)) + a + a.T
 
-    # run the forward pass up to the end-horizon.
-    for k in xrange(H):
-        forward[k+1] = kalman_predict(zmodel, *forward[k])
-
-    return forward, zmodel
+    return mu, Omega, c
 
 def get_zmoments(model, policy, gamma, H):
     """
@@ -251,35 +235,28 @@ def get_zmoments(model, policy, gamma, H):
     (J, Js, Z, ZZ) corresponding to the expected reward, sum of expected rewards
     at each time-horizon, and the first/second moments.
     """
-    forward, zmodel = get_forward(model, policy, H)
-    do_init = True
+    # initialize the z-space transition model and grab the forward messages.
+    zmodel = ZModel(model, policy)
+    forward = [(zmodel.mu0, zmodel.Sigma0)]
+    for k in xrange(H):
+        forward.append(kalman_predict(zmodel, forward[k]))
+
+    init = True
+    J, Js, Z, ZZ = 0, 0, 0, 0
+    mu, Omega = None, None
 
     for n in reversed(xrange(H+1)):
         try:
-            # these are the components of the forward messages and the backward
-            # messages respectively, i.e. p(z_n) and p(y_n|z_n).
-            mu_fwd, Sigma_fwd = forward[n]
-            mu_til, Omega_til, c = kalman_update(model, gamma**n, (mu_fwd, Sigma_fwd))
-        except np.linalg.LinAlgError:
-            do_init = True
-            continue
+            mu, Omega, c = kalman_smooth(model, zmodel, J, mu, Omega, gamma**n, forward[n], init)
+            init = False
 
-        if do_init:
-            mu, Omega = mu_til, Omega_til
+        except np.linalg.LinAlgError:
+            init = True
             J, Js, Z, ZZ = 0, 0, 0, 0
-            my_init, do_init = n, False
-        else:
-            try:
-                mu, Omega = kalman_smooth(zmodel, J, mu, Omega, mu_fwd, Sigma_fwd, mu_til, Omega_til)
-            except np.linalg.LinAlgError:
-                do_init = True
-                continue
+            continue
 
         # the sum of all components from n to the horizon H.
         J += c; Js += J; Z += mu; ZZ += Omega
-
-    # if my_init < H:
-    #     print 'WARNING: truncated horizon to %d (rather than %d)' % (n, H)
 
     return J, Js, Z, ZZ
 
@@ -317,11 +294,13 @@ def get_jtheta(model, policy, gamma, H):
     Get the expected reward of the model and policy using discount factor gamma
     and time-horizon H.
     """
-    forward, _ = get_forward(model, policy, H)
+    zmodel = ZModel(model, policy)
+    forward = (zmodel.mu0, zmodel.Sigma0)
     J = 0.0
-    for n in reversed(xrange(H)):
-        _, _, c = kalman_update(model, gamma**n, forward[n])
+    for n in xrange(H):
+        _, _, c = kalman_update(model, gamma**n, forward)
         J += c
+        forward = kalman_predict(zmodel, forward)
     return J
 
 def get_gradient(model, policy, gamma, H):
@@ -379,7 +358,7 @@ def solve_mogmdp(model, policy, gamma, H, sigma_min=0.1, em=False):
     discount factor gamma, and a time-horizon of H. Returns a tuple (theta,
     jtheta, info) where info is a dictionary containing extra information (i.e.
     per-iteration, etc.).
-    
+
     If `em` is True this will use a pseudo-gradient given by the EM steps,
     otherwise it will directly optimize using the gradient returned by EM.
     """
