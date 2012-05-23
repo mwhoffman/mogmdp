@@ -12,6 +12,9 @@ import lbfgsb
 
 __all__ = ['MoGMDP', 'MoGPolicy', 'solve_mogmdp', 'solve_mogmdp_em']
 
+__author__ = "Matthew W. Hoffman"
+__copyright__ = "Copyright (c) 2012, M.W.Hoffman <hoffmanm@cs.ubc.ca>"
+
 #===================================================================================================
 # classes for the mixture-of-Gaussians model, the corresponding policy, and the
 # transition model in the joint state/action space.
